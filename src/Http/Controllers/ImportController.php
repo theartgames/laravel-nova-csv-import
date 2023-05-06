@@ -2,15 +2,16 @@
 
 namespace SimonHamp\LaravelNovaCsvImport\Http\Controllers;
 
-use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Collection;
+use Illuminate\Contracts\Filesystem\Filesystem;
+use Illuminate\Validation\ValidationException;
 use Inertia\Response;
-use Laravel\Nova\Actions\ActionResource;
-use Laravel\Nova\Fields\Field;
-use Laravel\Nova\Http\Requests\NovaRequest;
 use Laravel\Nova\Nova;
 use Laravel\Nova\Resource;
+use Laravel\Nova\Fields\Field;
 use Laravel\Nova\Rules\Relatable;
+use Laravel\Nova\Actions\ActionResource;
+use SimonHamp\LaravelNovaCsvImport\Http\Requests\ImportNovaRequest;
 use Maatwebsite\Excel\Concerns\ToModel as ModelImporter;
 
 class ImportController
@@ -26,7 +27,7 @@ class ImportController
         $this->filesystem = $filesystem;
     }
 
-    public function configure(NovaRequest $request, string $file): Response
+    public function configure(ImportNovaRequest $request, string $file): Response
     {
         $file_name = pathinfo($file, PATHINFO_FILENAME);
 
@@ -42,7 +43,7 @@ class ImportController
 
         $rows = $import->take(10)->all();
 
-        $resources = $this->getAvailableResourcesForImport($request);
+        $resources = $this->getAvailableResourcesForImport($request); 
 
         $fields = $resources->mapWithKeys(function ($resource) use ($request) {
             return $this->getAvailableFieldsForImport($resource, $request);
@@ -50,7 +51,7 @@ class ImportController
 
         $resources = $resources->mapWithKeys(function ($resource) {
             return [
-                $resource::uriKey() => $resource::label(),
+                $resource::uriKey() => $resource::label()
             ];
         });
 
@@ -63,10 +64,11 @@ class ImportController
     }
 
     /**
+     * 
      * @throws \Symfony\Component\HttpKernel\Exception\HttpException
      * @throws \Symfony\Component\HttpKernel\Exception\NotFoundHttpException
      */
-    public function storeConfig(NovaRequest $request)
+    public function storeConfig(ImportNovaRequest $request)
     {
         $file = $request->input('file');
 
@@ -84,7 +86,7 @@ class ImportController
                                 ->reject(function ($modifier) {
                                     return empty($modifier['name']);
                                 });
-                        }),
+                        })
                 ],
             ),
             JSON_PRETTY_PRINT
@@ -99,7 +101,7 @@ class ImportController
         }
     }
 
-    public function preview(NovaRequest $request, string $file): Response
+    public function preview(ImportNovaRequest $request, string $file): Response
     {
         $config = $this->getConfigForFile($file);
 
@@ -125,7 +127,7 @@ class ImportController
         );
     }
 
-    public function import(NovaRequest $request)
+    public function import(ImportNovaRequest $request)
     {
         $file = $request->input('file');
 
@@ -138,6 +140,8 @@ class ImportController
         $resource_name = $config['resource'];
 
         $resource = Nova::resourceInstanceForKey($resource_name);
+
+        $request->setImportResource(get_class($resource));
         $rules = $this->extractValidationRules($resource, $request)->toArray();
         $model_class = $resource->resource::class;
 
@@ -174,7 +178,7 @@ class ImportController
         return response()->json(['review' => "/csv-import/review/{$file}"]);
     }
 
-    public function review(NovaRequest $request, string $file): Response
+    public function review(ImportNovaRequest $request, string $file): Response
     {
         if (! $results = $this->getLastResultsForFile($file)) {
             return redirect()->route('csv-import.preview', ['file' => $file]);
@@ -193,33 +197,40 @@ class ImportController
         );
     }
 
-    protected function getAvailableFieldsForImport(string $resource, NovaRequest $request): array
+    protected function getAvailableFieldsForImport(string $resource, ImportNovaRequest $request): array
     {
-        $novaResource = new $resource(new $resource::$model);
-        $fieldsCollection = collect($novaResource->creationFields($request));
-
-        if (method_exists($novaResource, 'excludeAttributesFromImport')) {
-            $fieldsCollection = $fieldsCollection->filter(function (Field $field) use ($novaResource, $request) {
-                return ! in_array($field->attribute, $novaResource::excludeAttributesFromImport($request));
+        try {
+            $novaResource = new $resource(new $resource::$model);
+            $fieldsCollection = collect($novaResource->creationFields($request));
+    
+            if (method_exists($novaResource, 'excludeAttributesFromImport')) {
+                $fieldsCollection = $fieldsCollection->filter(function(Field $field) use ($novaResource, $request) {
+                    return !in_array($field->attribute, $novaResource::excludeAttributesFromImport($request));
+                });
+            }
+    
+            $fields = $fieldsCollection->map(function (Field $field) use ($novaResource, $request) {
+                $request->setImportResource($novaResource);
+                
+                return [
+                    'name' => $field->name,
+                    'attribute' => $field->attribute,
+                    'rules' => $this->extractValidationRules($novaResource, $request)->get($field->attribute),
+                ];
             });
-        }
-
-        $fields = $fieldsCollection->map(function (Field $field) use ($novaResource, $request) {
+            
+            // Note: ->values() is used here to avoid this array being turned into an object due to 
+            // non-sequential keys (which might happen due to the filtering above.
             return [
-                'name' => $field->name,
-                'attribute' => $field->attribute,
-                'rules' => $this->extractValidationRules($novaResource, $request)->get($field->attribute),
+                $novaResource->uriKey() => $fields->values(),
             ];
-        });
-
-        // Note: ->values() is used here to avoid this array being turned into an object due to
-        // non-sequential keys (which might happen due to the filtering above.
-        return [
-            $novaResource->uriKey() => $fields->values(),
-        ];
+        } catch (\Throwable $th) {
+            return [];
+        }
+        
     }
 
-    protected function getAvailableResourcesForImport(NovaRequest $request): Collection
+    protected function getAvailableResourcesForImport(ImportNovaRequest $request): Collection
     {
         $novaResources = collect(Nova::authorizedResources($request));
 
@@ -228,19 +239,19 @@ class ImportController
                 return false;
             }
 
-            if (! isset($resource::$model)) {
+            if (!isset($resource::$model)) {
                 return false;
             }
-
+            
             $resourceReflection = (new \ReflectionClass((string) $resource));
-
+            
             if ($resourceReflection->hasMethod('canImportResource')) {
                 return $resource::canImportResource($request);
             }
 
             $static_vars = $resourceReflection->getStaticProperties();
 
-            if (! isset($static_vars['canImportResource'])) {
+            if (!isset($static_vars['canImportResource'])) {
                 return true;
             }
 
@@ -248,7 +259,7 @@ class ImportController
         });
     }
 
-    protected function extractValidationRules(Resource $resource, NovaRequest $request): Collection
+    protected function extractValidationRules(Resource $resource, ImportNovaRequest $request): Collection
     {
         return collect($resource::rulesForCreation($request))->mapWithKeys(function ($rule, $key) {
             foreach ($rule as $i => $r) {
@@ -260,7 +271,6 @@ class ImportController
                 if (is_a($r, Relatable::class)) {
                     $rule[$i] = function () use ($r) {
                         $r->query = $r->query->newQuery();
-
                         return $r;
                     };
                 }
