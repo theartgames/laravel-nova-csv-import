@@ -13,13 +13,6 @@
             <DefaultButton v-bind:disabled="!file" @click="upload">Upload &amp; Configure &rightarrow;</DefaultButton>
         </card>
 
-        <p class="mt-8 text-center">
-            Is <b>CSV Import</b> helping you work faster?<br>
-            Please consider
-            <a href="https://github.com/sponsors/simonhamp" target="_blank" class="text-primary-500 hover:text-primary-400 font-bold">
-                sponsoring me
-            </a>
-        </p>
     </div>
 </template>
 
